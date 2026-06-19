@@ -1,0 +1,77 @@
+[
+  {
+    "query": "AI 安全 对齐问题 鲁棒性 可解释性 三大核心",
+    "expected_titles": ["ai safety fundamentals"],
+    "section_id": 1
+  },
+  {
+    "query": "RLHF 人类反馈强化学习 PPO 奖励建模 DPO",
+    "expected_titles": ["rlhf and alignment techniques"],
+    "section_id": 1
+  },
+  {
+    "query": "越狱攻击 红队测试 DAN 对抗性提示 防御",
+    "expected_titles": ["red teaming and adversarial testing"],
+    "section_id": 2
+  },
+  {
+    "query": "欧盟 AI 法案 监管框架 风险分级 通用AI",
+    "expected_titles": ["ai governance and regulation"],
+    "section_id": 2
+  },
+  {
+    "query": "机械论可解释性 稀疏自编码器 特征操控 Anthropic",
+    "expected_titles": ["model interpretability research"],
+    "section_id": 3
+  },
+  {
+    "query": "前沿模型 风险评估 CBRN 自主复制 欺骗性对齐",
+    "expected_titles": ["frontier model risk assessment"],
+    "section_id": 3
+  },
+  {
+    "query": "Constitutional AI Anthropic Claude 宪法规则",
+    "expected_titles": ["rlhf and alignment techniques"],
+    "section_id": 1
+  },
+  {
+    "query": "ASL 安全等级 负责任扩展 Anthropic RSP",
+    "expected_titles": ["frontier model risk assessment"],
+    "section_id": 3
+  },
+  {
+    "query": "中国生成式人工智能管理 算法备案 网信办",
+    "expected_titles": ["ai governance and regulation"],
+    "section_id": 2
+  },
+  {
+    "query": "GCG 攻击 白盒攻击 AutoDAN 黑盒越狱",
+    "expected_titles": ["red teaming and adversarial testing"],
+    "section_id": 2
+  },
+  {
+    "query": "DPO 直接偏好优化 Stanford 奖励模型替代",
+    "expected_titles": ["rlhf and alignment techniques"],
+    "section_id": 1
+  },
+  {
+    "query": "NIST AI RMF 风险管理框架 评估标准",
+    "expected_titles": ["ai safety fundamentals"],
+    "section_id": 1
+  },
+  {
+    "query": "SB 1047 加州 AI 安全法案 前沿模型",
+    "expected_titles": ["ai governance and regulation"],
+    "section_id": 2
+  },
+  {
+    "query": "SAE 自编码器 单义性 Anthropic Sonnet 特征提取",
+    "expected_titles": ["model interpretability research"],
+    "section_id": 3
+  },
+  {
+    "query": "自我改进 递归自我改进 能力失控 METR 评估",
+    "expected_titles": ["frontier model risk assessment"],
+    "section_id": 3
+  }
+]
