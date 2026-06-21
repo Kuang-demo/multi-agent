@@ -35,10 +35,15 @@ async def async_main() -> int:
         "topic": final_state["topic"],
         "stage": final_state["current_stage"],
         "decision": final_state["review_decision"],
+        "iterations": final_state["iteration_count"],
+        "target_section_ids": final_state["target_section_ids"],
         "draft_version": final_state["draft_version"],
         "documents": len(final_state["raw_documents"]),
         "analyses": len(final_state["section_analyses"]),
         "report_path": final_state["report_path"],
+        "iteration_history": [
+            item.model_dump() for item in final_state["iteration_history"]
+        ],
     }
 
     print(json.dumps(summary, ensure_ascii=False, indent=2))

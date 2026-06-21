@@ -13,11 +13,13 @@ class DashScopeEmbeddings:
         self.api_url = settings.embedding_api_url
         self.model = settings.embedding_model
         self.timeout = settings.llm_request_timeout
-        self.batch_size = min(settings.embedding_batch_size, 10)
+        self.batch_size = max(1, min(settings.embedding_batch_size, 10))
 
     def _request_embeddings(self, texts: Sequence[str]) -> list[list[float]]:
         if not texts:
             return []
+        if not self.api_key:
+            raise RuntimeError("DASHSCOPE_API_KEY is required for vector embeddings.")
 
         response = requests.post(
             self.api_url,
@@ -40,7 +42,13 @@ class DashScopeEmbeddings:
             )
         payload = response.json()
         embeddings = payload.get("output", {}).get("embeddings", [])
-        return [item["embedding"] for item in embeddings]
+        vectors = [item["embedding"] for item in embeddings if "embedding" in item]
+        if len(vectors) != len(texts):
+            raise RuntimeError(
+                "DashScope embedding response count mismatch: "
+                f"expected={len(texts)}, got={len(vectors)}"
+            )
+        return vectors
 
     def embed_documents(self, texts: list[str]) -> list[list[float]]:
         cleaned_texts = [text for text in texts if text and text.strip()]

@@ -3,11 +3,17 @@ from __future__ import annotations
 import hashlib
 import importlib.util
 import json
+import logging
 import re
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
 from typing import Any
+
+if importlib.util.find_spec("langchain_community"):
+    from langchain_community.document_loaders import TextLoader, PyPDFLoader, Docx2txtLoader
+else:
+    TextLoader = PyPDFLoader = Docx2txtLoader = None  # type: ignore
 
 from src.config import has_embedding_credentials, settings
 from src.services.embeddings import DashScopeEmbeddings
@@ -15,6 +21,7 @@ from src.services.storage import ensure_database, get_connection
 from src.state import RawDocument
 
 
+logger = logging.getLogger(__name__)
 SUPPORTED_EXTENSIONS = {".md", ".txt", ".pdf", ".docx"}
 LATIN_TOKEN_PATTERN = re.compile(r"[A-Za-z0-9_]+")
 SENTENCE_SPLIT_PATTERN = re.compile(r"(?<=[。！？!?；;])|(?<=\.)\s+|\n+")
@@ -37,32 +44,31 @@ def _hash_content(text: str) -> str:
     return hashlib.sha1(text.encode("utf-8")).hexdigest()
 
 
+def _chunk_id_for_path(path: Path, chunk_index: int) -> str:
+    try:
+        relative_path = path.relative_to(Path(settings.local_data_dir))
+    except ValueError:
+        relative_path = path
+    path_hash = hashlib.sha1(str(relative_path).encode("utf-8")).hexdigest()[:8]
+    return f"{path.stem}-{path_hash}-{chunk_index}"
+
+
 def _load_documents_from_file(path: Path) -> list[dict[str, str]]:
     """
-    外围调包部分：
-    这里不手写 PDF / DOCX 解析，而是直接复用 LangChain 的 loader。
-    这样做的工程权衡是：
-    1. 文档解析不是本项目的核心竞争力，没必要重复造轮子。
-    2. 多格式路由交给成熟组件，更稳，也更符合真实工程实践。
-    3. 我们把"展示能力"的重点放在语义切分和检索策略，而不是文件解析。
+    PDF / DOCX 解析，直接用 LangChain 的 loader
     """
-    if not importlib.util.find_spec("langchain_community"):
+    if TextLoader is None:
         raise RuntimeError(
-            "缺少 langchain_community，请先执行 `pip install -r requirements.txt`。"
+            "langchain_community is required to load documents. "
+            "Install it with: pip install langchain-community"
         )
 
     suffix = path.suffix.lower()
     if suffix in {".md", ".txt"}:
-        from langchain_community.document_loaders import TextLoader
-
         loader = TextLoader(str(path), encoding="utf-8", autodetect_encoding=True)
     elif suffix == ".pdf":
-        from langchain_community.document_loaders import PyPDFLoader
-
         loader = PyPDFLoader(str(path))
     elif suffix == ".docx":
-        from langchain_community.document_loaders import Docx2txtLoader
-
         loader = Docx2txtLoader(str(path))
     else:
         return []
@@ -75,7 +81,6 @@ def _load_documents_from_file(path: Path) -> list[dict[str, str]]:
             continue
         normalized_docs.append(
             {
-                "doc_key": f"{path.stem}-{index}",
                 "title": _normalize_title(path),
                 "path": str(path),
                 "content": content,
@@ -243,7 +248,7 @@ def _load_chunks_from_files() -> list[LocalChunk]:
         for document in documents:
             chunk_texts = _chunk_text(document["content"], path.suffix.lower())
             for chunk_text in chunk_texts:
-                chunk_id = f"{path.stem}-{chunk_index}"
+                chunk_id = _chunk_id_for_path(path, chunk_index)
                 chunk_index += 1
                 chunks.append(
                     LocalChunk(
@@ -328,16 +333,33 @@ def build_knowledge_base(force_rebuild: bool = False) -> dict[str, int]:
 
     vector_store = _get_vector_store()
     if vector_store:
-        existing_ids = set(vector_store.get(include=[])["ids"])
+        existing = vector_store.get(include=["metadatas"])
+        existing_ids = set(existing["ids"])
+        existing_hashes = {
+            chunk_id: metadata.get("content_hash", "")
+            for chunk_id, metadata in zip(existing["ids"], existing["metadatas"])
+            if metadata
+        }
         if force_rebuild and existing_ids:
             vector_store.delete(ids=list(existing_ids))
             existing_ids = set()
+            existing_hashes = {}
 
-        new_chunks = [chunk for chunk in chunks if chunk.chunk_id not in existing_ids]
-        if new_chunks:
+        stale_ids = [
+            chunk.chunk_id
+            for chunk in chunks
+            if chunk.chunk_id in existing_ids
+            and existing_hashes.get(chunk.chunk_id) != chunk.content_hash
+        ]
+        if stale_ids:
+            vector_store.delete(ids=stale_ids)
+            existing_ids.difference_update(stale_ids)
+
+        chunks_to_upsert = [chunk for chunk in chunks if chunk.chunk_id not in existing_ids]
+        if chunks_to_upsert:
             vector_store.add_texts(
-                texts=[chunk.text for chunk in new_chunks],
-                ids=[chunk.chunk_id for chunk in new_chunks],
+                texts=[chunk.text for chunk in chunks_to_upsert],
+                ids=[chunk.chunk_id for chunk in chunks_to_upsert],
                 metadatas=[
                     {
                         "title": chunk.title,
@@ -345,7 +367,7 @@ def build_knowledge_base(force_rebuild: bool = False) -> dict[str, int]:
                         "chunk_id": chunk.chunk_id,
                         "content_hash": chunk.content_hash,
                     }
-                    for chunk in new_chunks
+                    for chunk in chunks_to_upsert
                 ],
             )
 
@@ -421,10 +443,11 @@ def search_vector_documents(query: str, section_id: int, top_k: int) -> list[Raw
 
     results = vector_store.similarity_search_with_score(query, k=top_k)
     documents: list[RawDocument] = []
+    chunks_by_id = {chunk.chunk_id: chunk for chunk in load_local_chunks()}
     for doc, score in results:
         metadata = doc.metadata or {}
         chunk_id = metadata.get("chunk_id", "")
-        chunk = next((item for item in load_local_chunks() if item.chunk_id == chunk_id), None)
+        chunk = chunks_by_id.get(chunk_id)
         if not chunk:
             continue
         normalized = 1.0 / (1.0 + max(float(score), 0.0))
@@ -458,16 +481,19 @@ def rerank_documents(query: str, documents: list[RawDocument], top_k: int) -> li
 
 
 def log_retrieval(query: str, section_id: int, method: str, document_ids: list[str]) -> None:
-    ensure_database()
-    with get_connection() as conn:
-        conn.execute(
-            """
-            INSERT INTO retrieval_logs (query, section_id, retrieval_method, document_ids)
-            VALUES (?, ?, ?, ?)
-            """,
-            (query, section_id, method, json.dumps(document_ids, ensure_ascii=False)),
-        )
-        conn.commit()
+    try:
+        ensure_database()
+        with get_connection() as conn:
+            conn.execute(
+                """
+                INSERT INTO retrieval_logs (query, section_id, retrieval_method, document_ids)
+                VALUES (?, ?, ?, ?)
+                """,
+                (query, section_id, method, json.dumps(document_ids, ensure_ascii=False)),
+            )
+            conn.commit()
+    except Exception as exc:
+        logger.warning("Failed to write retrieval log: %s", exc)
 
 
 def search_hybrid_documents(query: str, section_id: int) -> list[RawDocument]:

@@ -1,8 +1,8 @@
 import logging
 
-from langchain_core.messages import HumanMessage, SystemMessage
 from pydantic import BaseModel, Field
 
+from src.config import settings
 from src.services.llm_json import invoke_json_schema
 from src.state import AgentState, Section
 
@@ -18,7 +18,11 @@ class PlannerSectionSchema(BaseModel):
 
 class PlannerOutputSchema(BaseModel):
     topic: str = Field(..., min_length=4, max_length=80)
-    sections: list[PlannerSectionSchema] = Field(..., min_length=5, max_length=6)
+    sections: list[PlannerSectionSchema] = Field(
+        ...,
+        min_length=settings.min_sections,
+        max_length=settings.max_sections,
+    )
 
 
 PLANNER_SYSTEM_PROMPT = """
@@ -30,9 +34,49 @@ PLANNER_SYSTEM_PROMPT = """
 """
 
 
+def _clean_text(value: str, max_length: int) -> str:
+    return " ".join(value.split())[:max_length].strip()
+
+
+def _normalize_search_queries(
+    topic: str,
+    section_title: str,
+    objective: str,
+    queries: list[str],
+) -> list[str]:
+    normalized: list[str] = []
+    seen: set[str] = set()
+
+    for query in queries:
+        cleaned = _clean_text(query, 80)
+        key = cleaned.lower()
+        if not cleaned or key in seen:
+            continue
+        seen.add(key)
+        normalized.append(cleaned)
+        if len(normalized) >= 4:
+            break
+
+    fallback_candidates = [
+        f"{section_title} {topic}",
+        f"{section_title} {objective}",
+        f"{topic} {section_title}",
+    ]
+    for candidate in fallback_candidates:
+        cleaned = _clean_text(candidate, 80)
+        key = cleaned.lower()
+        if cleaned and key not in seen:
+            seen.add(key)
+            normalized.append(cleaned)
+        if len(normalized) >= 3:
+            break
+
+    return normalized[:4]
+
+
 async def _llm_plan(query: str) -> tuple[str, list[Section]]:
     user_prompt = (
-        "请为下面这个研究主题生成一个 5 到 6 章的报告规划。\n"
+        f"请为下面这个研究主题生成一个 {settings.min_sections} 到 {settings.max_sections} 章的报告规划。\n"
         "要求：\n"
         "1. 章节标题用中文。\n"
         "2. 每章都要有明确目标。\n"
@@ -49,27 +93,30 @@ async def _llm_plan(query: str) -> tuple[str, list[Section]]:
     outline = [
         Section(
             section_id=index,
-            title=section.title,
-            objective=section.objective,
-            search_queries=section.search_queries,
+            title=_clean_text(section.title, 30),
+            objective=_clean_text(section.objective, 80),
+            search_queries=_normalize_search_queries(
+                topic=result.topic,
+                section_title=section.title,
+                objective=section.objective,
+                queries=section.search_queries,
+            ),
         )
         for index, section in enumerate(result.sections, start=1)
     ]
-    return result.topic, outline
+    return _clean_text(result.topic, 80), outline
 
 
 async def planner_node(state: AgentState) -> dict:
     topic, outline = await _llm_plan(state["query"])
     logger.info("Planner 使用 LLM 生成了动态大纲。")
 
-    all_queries = [query_text for section in outline for query_text in section.search_queries]
+    all_queries = list(
+        dict.fromkeys(query_text for section in outline for query_text in section.search_queries)
+    )
     return {
         "topic": topic,
         "outline": outline,
         "search_queries": all_queries,
         "current_stage": "planned",
-        "messages": [
-            SystemMessage(content="你是研究工作流中的规划节点。"),
-            HumanMessage(content=state["query"]),
-        ],
     }

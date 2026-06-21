@@ -26,10 +26,61 @@ ANALYZER_SYSTEM_PROMPT = """
 输出尽量简洁、专业、中文化。
 """
 
-#   函数会把前 3 条证据加工成引用索引字符串。
+
+def _truncate_text(text: str, max_chars: int) -> str:
+    compact = " ".join((text or "").split())
+    if len(compact) <= max_chars:
+        return compact
+
+    best_pos = 0
+    for boundary_char in "。！？.!?\n":
+        pos = compact.rfind(boundary_char, max_chars - 120, max_chars)
+        if pos > best_pos:
+            best_pos = pos
+    cut = best_pos + 1 if best_pos > 0 else max_chars
+    return compact[:cut].rstrip() + "..."
+
+
+def _select_top_documents(docs: list[RawDocument], limit: int = 4) -> list[RawDocument]:
+    return sorted(
+        docs,
+        key=lambda doc: (doc.relevance_score, len(doc.content or doc.summary)),
+        reverse=True,
+    )[:limit]
+
+
+def _build_evidence_snippets(docs: list[RawDocument]) -> list[str]:
+    return [_truncate_text(doc.content or doc.summary, 500) for doc in docs]
+
+
+def _build_empty_analysis(section_title: str, section_id: int) -> SectionAnalysis:
+    return SectionAnalysis(
+        section_id=section_id,
+        section_title=section_title,
+        summary="当前章节没有检索到可支撑事实性分析的有效证据，暂不生成结论。",
+        key_points=[],
+        evidence_doc_ids=[],
+        evidence_snippets=[],
+        citations=[],
+        missing_gaps=["未检索到可支撑本章节的有效证据"],
+        confidence=0.0,
+    )
+
+
+def _build_insight_claim(summary: str, key_points: list[str], missing_gaps: list[str]) -> str:
+    if key_points:
+        return key_points[0]
+    if summary:
+        return summary
+    if missing_gaps:
+        return f"当前章节仍存在信息缺口：{missing_gaps[0]}"
+    return "当前章节缺少足够证据，暂不形成事实性洞察。"
+
+
+#   函数会把前 4 条证据加工成引用索引字符串。
 def _build_citations(docs: list[RawDocument]) -> list[str]:
     citations: list[str] = []
-    for index, doc in enumerate(docs[:3], start=1):
+    for index, doc in enumerate(docs[:4], start=1):
         citations.append(
             f"[C{index}] {doc.title} | {doc.retrieval_method} | score={doc.relevance_score:.3f} | {doc.url or doc.source}"
         )
@@ -42,20 +93,20 @@ async def _llm_analyze_section(
     docs: list[RawDocument],
 ) -> AnalyzerOutputSchema:
     evidence_blocks = []
-    for index, doc in enumerate(docs[:3], start=1):
+    for index, doc in enumerate(docs[:4], start=1):
         evidence_blocks.append(
             f"[C{index}]\n"
             f"标题：{doc.title}\n"  ## 证据标题，例如文件标题或网页标题。
             f"检索方式：{doc.retrieval_method}\n"
             f"分数：{doc.relevance_score:.3f}\n"
-            f"内容：{doc.content or doc.summary}"
+            f"内容：{_truncate_text(doc.content or doc.summary, 900)}"
         )
     user_prompt = (
         f"章节标题：{section_title}\n"
         f"章节目标：{objective}\n\n"
         "证据片段：\n"
         + "\n\n".join(evidence_blocks)
-        + "\n\n请让关键事实尽量和 [C1] [C2] [C3] 这些证据标签保持对应。"
+        + "\n\n请让关键事实尽量和 [C1] [C2] [C3] [C4]这些证据标签保持对应。"
     )
     return await invoke_json_schema(
         system_prompt=ANALYZER_SYSTEM_PROMPT,
@@ -81,29 +132,32 @@ async def analyzer_node(state: AgentState) -> dict:
     analyses: list[SectionAnalysis] = []
 
     for section in state["outline"]:
-        docs = sorted(
-            grouped_docs.get(section.section_id, []),
-            key=lambda item: item.relevance_score,  #按 relevance_score 降序排序
-            reverse=True,
-        )
-        top_docs = docs[:3]
+        docs = grouped_docs.get(section.section_id, [])
+        top_docs = _select_top_documents(docs)
         evidence_doc_ids = [doc.doc_id for doc in top_docs]
-        # 用 500 字符，优先在句子边界处截断，避免切碎单词
-        _raw_snippets: list[str] = []
-        for doc in top_docs:
-            text = doc.content or doc.summary
-            if len(text) <= 500:
-                _raw_snippets.append(text)
-            else:
-                # 在 [400, 500] 区间内找最靠后的句子边界
-                best_pos = 0
-                for boundary_char in "。！？\n":
-                    pos = text.rfind(boundary_char, 400, 500)
-                    if pos > best_pos:
-                        best_pos = pos
-                cut = best_pos + 1 if best_pos > 0 else 500
-                _raw_snippets.append(text[:cut])
-        evidence_snippets = _raw_snippets
+        evidence_snippets = _build_evidence_snippets(top_docs)
+
+        if not top_docs:
+            analysis = _build_empty_analysis(section.title, section.section_id)
+            analyses.append(analysis)
+            insights.append(
+                Insight(
+                    insight_id=f"insight-{section.section_id}",
+                    section_id=section.section_id,
+                    claim=_build_insight_claim(
+                        analysis.summary,
+                        analysis.key_points,
+                        analysis.missing_gaps,
+                    ),
+                    evidence_doc_ids=[],
+                    confidence=0.0,
+                )
+            )
+            logger.warning(
+                "Analyzer skipped section %s because no evidence was available.",
+                section.section_id,
+            )
+            continue
 
         llm_result = await _llm_analyze_section(section.title, section.objective, top_docs)
         summary = llm_result.summary[:600]
@@ -130,7 +184,7 @@ async def analyzer_node(state: AgentState) -> dict:
             Insight(
                 insight_id=f"insight-{section.section_id}",
                 section_id=section.section_id,
-                claim=f"{section.title} 可以基于当前证据形成一版可解释的章节草稿。",
+                claim=_build_insight_claim(summary, key_points, missing_gaps),
                 evidence_doc_ids=evidence_doc_ids,
                 confidence=confidence,
             )

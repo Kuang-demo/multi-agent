@@ -1,5 +1,7 @@
 from pathlib import Path
+import re
 import shutil
+from datetime import datetime
 
 from fastapi import FastAPI, File, HTTPException, UploadFile
 from pydantic import BaseModel
@@ -17,7 +19,15 @@ class ResearchRequest(BaseModel):
     thread_id: str = "api"
 
 
-ALLOWED_UPLOAD_SUFFIXES = {".md", ".txt", ".pdf"}
+ALLOWED_UPLOAD_SUFFIXES = {".md", ".txt", ".pdf", ".docx"}
+
+
+def _safe_upload_name(filename: str, suffix: str) -> str:
+    raw_name = Path(filename or f"upload{suffix}").name
+    stem = Path(raw_name).stem or "upload"
+    safe_stem = re.sub(r"[^\w.-]+", "_", stem).strip("._") or "upload"
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+    return f"{timestamp}_{safe_stem[:60]}{suffix}"
 
 
 def _save_upload(file: UploadFile) -> str:
@@ -27,7 +37,7 @@ def _save_upload(file: UploadFile) -> str:
 
     upload_dir = Path(settings.upload_dir)
     upload_dir.mkdir(parents=True, exist_ok=True)
-    target = upload_dir / (file.filename or f"upload{suffix}")
+    target = upload_dir / _safe_upload_name(file.filename or "", suffix)
 
     with target.open("wb") as buffer:
         shutil.copyfileobj(file.file, buffer)
@@ -67,6 +77,7 @@ async def create_research(request: ResearchRequest) -> dict:
         "topic": final_state["topic"],
         "stage": final_state["current_stage"],
         "decision": final_state["review_decision"],
+        "target_section_ids": final_state["target_section_ids"],
         "draft_version": final_state["draft_version"],
         "report_path": final_state["report_path"],
         "outline": [section.model_dump() for section in final_state["outline"]],
@@ -74,5 +85,8 @@ async def create_research(request: ResearchRequest) -> dict:
         "analyses": [item.model_dump() for item in final_state["section_analyses"]],
         "insights": [item.model_dump() for item in final_state["key_insights"]],
         "review_feedback": [item.model_dump() for item in final_state["review_feedback"]],
+        "iteration_history": [
+            item.model_dump() for item in final_state["iteration_history"]
+        ],
         "draft": final_state["draft"],
     }

@@ -17,11 +17,26 @@ logger = logging.getLogger(__name__)
 
 
 def route_after_reviewer(state: AgentState) -> Literal["Searcher", "__end__"]:
-    if state["review_decision"] == "pass":
+    decision = state["review_decision"]
+    iteration_count = state["iteration_count"]
+
+    if decision == "pass":
         return "__end__"
-    if state["iteration_count"] >= settings.max_iterations:
-        return "__end__"
-    return "Searcher"
+
+    if decision == "research":
+        if iteration_count >= settings.max_iterations:
+            logger.info(
+                "Stop research loop after reaching max review iterations: %s.",
+                settings.max_iterations,
+            )
+            return "__end__"
+        return "Searcher"
+
+    logger.warning(
+        "Stop graph because reviewer returned unexpected decision: %r.",
+        decision,
+    )
+    return "__end__"
 
 
 def build_graph():
@@ -51,9 +66,10 @@ async def run_report(query: str, thread_id: str = "default") -> AgentState:
     config = {"configurable": {"thread_id": thread_id}}
     final_state = await graph.ainvoke(initial_state, config=config)
     logger.info(
-        "Run complete: topic=%s decision=%s draft_version=%s report_path=%s",
+        "Run complete: topic=%s decision=%s iterations=%s draft_version=%s report_path=%s",
         final_state["topic"],
         final_state["review_decision"],
+        final_state["iteration_count"],
         final_state["draft_version"],
         final_state["report_path"],
     )

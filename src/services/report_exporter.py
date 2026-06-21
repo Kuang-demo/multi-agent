@@ -14,7 +14,7 @@ def _safe_name(value: str) -> str:
 def export_markdown_report(topic: str, content: str, draft_version: int) -> str:
     output_dir = Path("outputs")
     output_dir.mkdir(parents=True, exist_ok=True)
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
     file_name = f"{timestamp}_v{draft_version}_{_safe_name(topic)}.md"
     path = output_dir / file_name
     path.write_text(content, encoding="utf-8")

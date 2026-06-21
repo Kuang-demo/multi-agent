@@ -2,9 +2,19 @@ from __future__ import annotations
 
 from typing import Annotated, Literal, TypedDict
 
-from langchain_core.messages import BaseMessage
-from langgraph.graph.message import add_messages
 from pydantic import BaseModel, Field
+
+
+ReviewDecision = Literal["", "pass", "research"]
+IterationDecision = Literal["pass", "research"]
+WorkflowStage = Literal[
+    "created",
+    "planned",
+    "searched",
+    "analyzed",
+    "written",
+    "reviewed",
+]
 
 
 # 一章报告的规划结果。
@@ -101,20 +111,51 @@ class ReviewComment(BaseModel):
     recommendation: str
 
 
-# LangGraph 在多次节点更新同一个字段时，需要知道“怎么合并”。
+class IterationRecord(BaseModel):
+    iteration: int = Field(..., ge=1)
+    decision: IterationDecision
+    reason: str = ""
+    target_section_ids: list[int] = Field(default_factory=list)
+    suggested_search_queries: list[str] = Field(default_factory=list)
+    draft_version: int = 0
+
+
+# LangGraph 在多次节点更新同一个字段时，需要知道"怎么合并"。
 # 下面这些 merge_* 函数就是在定义各类结构化数据的合并策略。
+def _document_quality_key(doc: RawDocument) -> tuple[float, int, int]:
+    return (
+        doc.relevance_score,
+        len(doc.content or ""),
+        len(doc.summary or ""),
+    )
+
+
+def _document_identity_key(doc: RawDocument) -> tuple[int, str, str]:
+    if doc.chunk_id:
+        return (doc.section_id, "chunk", doc.chunk_id)
+    if doc.url:
+        return (doc.section_id, "url", doc.url)
+    return (doc.section_id, "doc", doc.doc_id)
+
+
 def merge_documents(existing: list[RawDocument], new: list[RawDocument]) -> list[RawDocument]:
-    merged = {(doc.section_id, doc.doc_id): doc for doc in existing}
+    merged = {_document_identity_key(doc): doc for doc in existing}
     for doc in new:
-        merged[(doc.section_id, doc.doc_id)] = doc
-    return list(merged.values())
+        key = _document_identity_key(doc)
+        current = merged.get(key)
+        if current is None or _document_quality_key(doc) >= _document_quality_key(current):
+            merged[key] = doc
+    return sorted(
+        merged.values(),
+        key=lambda doc: (doc.section_id, -doc.relevance_score, doc.doc_id),
+    )
 
 
 def merge_insights(existing: list[Insight], new: list[Insight]) -> list[Insight]:
     merged = {item.insight_id: item for item in existing}
     for item in new:
         merged[item.insight_id] = item
-    return list(merged.values())
+    return sorted(merged.values(), key=lambda item: (item.section_id, item.insight_id))
 
 
 def merge_section_analyses(
@@ -123,16 +164,16 @@ def merge_section_analyses(
     merged = {item.section_id: item for item in existing}
     for item in new:
         merged[item.section_id] = item
-    return list(merged.values())
+    return sorted(merged.values(), key=lambda item: item.section_id)
 
 
-def merge_review_feedback(
-    existing: list[ReviewComment], new: list[ReviewComment]
-) -> list[ReviewComment]:
-    merged = {item.comment_id: item for item in existing}
+def merge_iteration_history(
+    existing: list[IterationRecord], new: list[IterationRecord]
+) -> list[IterationRecord]:
+    merged = {item.iteration: item for item in existing}
     for item in new:
-        merged[item.comment_id] = item
-    return list(merged.values())
+        merged[item.iteration] = item
+    return sorted(merged.values(), key=lambda item: item.iteration)
 
 
 # 整个多智能体工作流共享的“全局状态”。
@@ -160,19 +201,19 @@ class AgentState(TypedDict):
     # 导出的报告文件路径。
     report_path: str
     # Reviewer 产生的审查反馈列表。
-    review_feedback: Annotated[list[ReviewComment], merge_review_feedback]
+    review_feedback: list[ReviewComment]
     # Reviewer 的最终判断，例如 pass / research。
-    review_decision: str
+    review_decision: ReviewDecision
     # Reviewer 建议的定向补充检索词，当 decision=research 时 Searcher 会合并使用。
     suggested_search_queries: list[str]
+    # Reviewer 判断需要补充检索的章节 ID；为空时表示没有定向补充目标。
+    target_section_ids: list[int]
+    # 每轮审查和回流的摘要记录，便于 API/CLI 展示运行过程。
+    iteration_history: Annotated[list[IterationRecord], merge_iteration_history]
     # 当前工作流执行到了哪个阶段，例如 planned / searched / analyzed。
-    current_stage: str
+    current_stage: WorkflowStage
     # 当前已经循环了多少轮，用来避免无限回环。
     iteration_count: int
-    # LangGraph 消息历史。
-    # add_messages 表示新消息会追加进去，而不是直接覆盖。
-    messages: Annotated[list[BaseMessage], add_messages]
-
 
 # 创建工作流的初始状态。
 # 所有字段先放一个合理的默认值，后续由各节点逐步填充。
@@ -191,7 +232,8 @@ def create_initial_state(query: str) -> AgentState:
         "review_feedback": [],
         "review_decision": "",
         "suggested_search_queries": [],
+        "target_section_ids": [],
+        "iteration_history": [],
         "current_stage": "created",
         "iteration_count": 0,
-        "messages": [],
     }

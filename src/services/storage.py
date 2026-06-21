@@ -11,7 +11,7 @@ from src.config import settings
 def ensure_database() -> None:
     db_path = Path(settings.sqlite_db_path)
     db_path.parent.mkdir(parents=True, exist_ok=True)
-    with sqlite3.connect(db_path) as conn:
+    with sqlite3.connect(db_path, timeout=30) as conn:
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS knowledge_chunks (
@@ -42,7 +42,7 @@ def ensure_database() -> None:
 @contextmanager
 def get_connection() -> Iterator[sqlite3.Connection]:
     ensure_database()
-    conn = sqlite3.connect(settings.sqlite_db_path)
+    conn = sqlite3.connect(settings.sqlite_db_path, timeout=30)
     try:
         yield conn
     finally:
